@@ -76,12 +76,14 @@ submit local
 import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import get_json_object, concat_ws
+from pyspark.sql.functions import get_json_object, to_json, concat_ws
+from pyspark.sql.functions import struct
 from pyspark.sql.functions import window
 from pyspark.sql.types import *
 
 
 def main():
+    kafka_output_format_is_json = True
     sink = "Kafka"
 
     spark = SparkSession.builder \
@@ -129,18 +131,29 @@ def main():
         .withColumnRenamed("avg(value)", "avg_value")
 
     if sink == "Kafka":
-        # concat_ws concatenates multiple input string columns together into a single string column,
-        # using the given separator.
-        result_data_frame = aggregate_data.select(
-            concat_ws(
-                "##",
-                aggregate_data.window.cast(StringType()),
-                aggregate_data.id,
-                aggregate_data.avg_value
+        if kafka_output_format_is_json is True:
+            result_data_frame = aggregate_data.select(
+                to_json(
+                    struct(
+                        aggregate_data.window.cast(StringType()).alias("window"),
+                        aggregate_data.id,
+                        aggregate_data.avg_value
+                    )
+                ).alias("value")
             )
-            .cast(StringType())
-            .alias("value")
-        )
+        else:
+            # concat_ws concatenates multiple input string columns together into a single string column,
+            # using the given separator.
+            result_data_frame = aggregate_data.select(
+                concat_ws(
+                    "##",
+                    aggregate_data.window.cast(StringType()),
+                    aggregate_data.id,
+                    aggregate_data.avg_value
+                )
+                .cast(StringType())
+                .alias("value")
+            )
 
         # Checkpoint location:
         #   For some output sinks where the end-to-end fault-tolerance can be guaranteed,
@@ -162,6 +175,27 @@ def main():
         '''
         Kafka topic spark-test-output receive messages
         ==============================================
+        {"window":"[2020-01-01 08:50:00, 2020-01-01 09:05:00]","id":"id-002","avg_value":37.0}
+        {"window":"[2020-01-01 08:50:00, 2020-01-01 09:05:00]","id":"id-003","avg_value":38.0}
+        {"window":"[2020-01-01 08:40:00, 2020-01-01 08:55:00]","id":"id-003","avg_value":33.0}
+        {"window":"[2020-01-01 08:40:00, 2020-01-01 08:55:00]","id":"id-001","avg_value":31.0}
+        {"window":"[2020-01-01 08:40:00, 2020-01-01 08:55:00]","id":"id-002","avg_value":32.0}
+        {"window":"[2020-01-01 08:20:00, 2020-01-01 08:35:00]","id":"id-003","avg_value":23.0}
+        {"window":"[2020-01-01 08:00:00, 2020-01-01 08:15:00]","id":"id-001","avg_value":11.0}
+        {"window":"[2020-01-01 08:00:00, 2020-01-01 08:15:00]","id":"id-002","avg_value":12.0}
+        {"window":"[2020-01-01 09:00:00, 2020-01-01 09:15:00]","id":"id-001","avg_value":41.0}
+        {"window":"[2020-01-01 08:20:00, 2020-01-01 08:35:00]","id":"id-002","avg_value":22.0}
+        {"window":"[2020-01-01 08:00:00, 2020-01-01 08:15:00]","id":"id-003","avg_value":13.0}
+        {"window":"[2020-01-01 07:50:00, 2020-01-01 08:05:00]","id":"id-001","avg_value":11.0}
+        {"window":"[2020-01-01 09:00:00, 2020-01-01 09:15:00]","id":"id-002","avg_value":42.0}
+        {"window":"[2020-01-01 08:20:00, 2020-01-01 08:35:00]","id":"id-001","avg_value":21.0}
+        {"window":"[2020-01-01 07:50:00, 2020-01-01 08:05:00]","id":"id-003","avg_value":13.0}
+        {"window":"[2020-01-01 08:50:00, 2020-01-01 09:05:00]","id":"id-001","avg_value":36.0}
+        {"window":"[2020-01-01 07:50:00, 2020-01-01 08:05:00]","id":"id-002","avg_value":12.0}
+        {"window":"[2020-01-01 09:00:00, 2020-01-01 09:15:00]","id":"id-003","avg_value":43.0}
+
+        or
+
         [2020-01-01 08:50:00, 2020-01-01 09:05:00]##id-002##37.0
         [2020-01-01 08:50:00, 2020-01-01 09:05:00]##id-003##38.0
         [2020-01-01 08:40:00, 2020-01-01 08:55:00]##id-003##33.0
