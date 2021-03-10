@@ -76,13 +76,15 @@ submit local
 import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, json_tuple, get_json_object, concat_ws
+from pyspark.sql.functions import from_json, json_tuple, get_json_object, to_json, concat_ws
+from pyspark.sql.functions import struct
 from pyspark.sql.functions import window
 from pyspark.sql.types import *
 
 
 def main():
     print_data_frame = True
+    output_format_is_json = True
 
     spark = SparkSession.builder \
         .appName("MyTest") \
@@ -106,7 +108,29 @@ def main():
         '''
         raw_data.show(100, False)
 
+    # selectExpr projects a set of SQL expressions and returns a new DataFrame, e.g.
+    #     data_frame.selectExpr("column_1/2 as new_column_1", "round(column_2/column_1) as new_column_2")
     raw_data = raw_data.selectExpr("offset", "timestamp", "CAST(value AS STRING) as json_str").cache()
+
+    # explode can convert a map/array column to multi rows
+    """
+    from pyspark.sql.functions import explode
+    from pyspark.sql.functions import split
+    data = [("ID_1", "A,B,C"), ("ID_2", "D,E,F")]
+    df = spark.createDataFrame(data, ("key", "value"))
+    df.select(df.key, explode(split(df.value, ",")).alias("value")).show()
+    
+    +----+-----+
+    | key|value|
+    +----+-----+
+    |ID_1|    A|
+    |ID_1|    B|
+    |ID_1|    C|
+    |ID_2|    D|
+    |ID_2|    E|
+    |ID_2|    F|
+    +----+-----+
+    """
 
     json_schema = StructType(
         [
@@ -116,7 +140,14 @@ def main():
         ]
     )
     # from_json parse a string column to a json (map) column
-    json_data = raw_data.select(raw_data.offset, from_json(raw_data.json_str, schema=json_schema).alias("data"))
+    json_column_data = raw_data.select(raw_data.offset,
+                                       from_json(raw_data.json_str, schema=json_schema).alias("data"))
+    # change the map column to multi-column
+    # without alias the column name is data.id
+    json_data = json_column_data.select(json_column_data.offset,
+                                        json_column_data.data.id.alias("id"),
+                                        json_column_data.data.time.alias("time"),
+                                        json_column_data.data.value.alias("value"))
     if print_data_frame:
         '''
         +------+---------------------------------+
@@ -126,7 +157,40 @@ def main():
         |1     |[id-002, 2020-01-01 08:00:02, 12]|
         |2     |[id-003, 2020-01-01 08:00:03, 13]|
         '''
+        json_column_data.show(100, False)
+        '''
+        +------+------+-------------------+-----+
+        |offset|id    |time               |value|
+        +------+------+-------------------+-----+
+        |0     |id-001|2020-01-01 08:00:01|11   |
+        |1     |id-002|2020-01-01 08:00:02|12   |
+        |2     |id-003|2020-01-01 08:00:03|13   |
+        '''
         json_data.show(100, False)
+
+    # from_json also can parse the nested json data
+    """
+    data = [("1", '''{"f1": "value1", "f2": {"f3": "value2"}}'''), ("2", '''{"f1": "value12"}''')]
+    df = spark.createDataFrame(data, ("key", "value"))
+    json_schema = StructType(
+        [
+            StructField("f1", StringType()),
+            StructField("f2", StructType([StructField("f3", StringType())]), True)
+        ]
+    )
+    json_column_data = df.select(df.key, 
+                                 from_json(df.value, schema=json_schema).alias("data"))
+    json_data = json_column_data.select(json_column_data.data.f1.alias("f1"),
+                                        json_column_data.data.f2.f3.alias("f3"))
+    json_data.show(100, False)
+    
+    +-------+------+
+    |f1     |f3    |
+    +-------+------+
+    |value1 |value2|
+    |value12|null  |
+    +-------+------+
+    """
 
     # json_tuple parse a json string column to multi-column
     # (without alias, the column will be c0, c1, c2, ...)
@@ -144,14 +208,6 @@ def main():
         json_data.show(100, False)
 
     # get_json_object create a column base on the json column and json path
-    # the json can be complicated with nested fields
-    # e.g.
-    #    data = [("1", '''{"f1": "value1", "f2": {"f3": "value2"}}'''), ("2", '''{"f1": "value12"}''')]
-    #    df = spark.createDataFrame(data, ("key", "value"))
-    #    df.select(df.key,
-    #              get_json_object(df.value, '$.f1').alias("c1"),
-    #              get_json_object(df.value, '$.f2.f3').alias("c2")
-    #    ).show()
     json_data = raw_data.select(
         raw_data.offset,
         get_json_object(raw_data.json_str, "$.id").alias("id"),
@@ -168,6 +224,23 @@ def main():
         |2     |id-003|2020-01-01 08:00:03|13   |
         '''
         json_data.show(100, False)
+
+    # get_json_object also can parse the nested json data
+    """
+    data = [("1", '''{"f1": "value1", "f2": {"f3": "value2"}}'''), ("2", '''{"f1": "value12"}''')]
+    df = spark.createDataFrame(data, ("key", "value"))
+    df.select(df.key,
+              get_json_object(df.value, '$.f1').alias("c1"),
+              get_json_object(df.value, '$.f2.f3').alias("c2")
+    ).show()
+    
+    +---+-------+------+
+    |key|     c1|    c2|
+    +---+-------+------+
+    |  1| value1|value2|
+    |  2|value12|  null|
+    +---+-------+------+
+    """
 
     if print_data_frame:
         '''
@@ -249,37 +322,67 @@ def main():
         json_data.id
     ).avg("value").orderBy('window', 'id').withColumnRenamed("avg(value)", "avg_value")
 
-    # concat_ws concatenates multiple input string columns together into a single string column,
-    # using the given separator.
-    result_data_frame = result_data_frame.select(
-        concat_ws(
-            "##",
-            result_data_frame.window.cast(StringType()),
-            result_data_frame.id,
-            result_data_frame.avg_value
+    if output_format_is_json is True:
+        result_data_frame = result_data_frame.select(
+            to_json(
+                struct(
+                    result_data_frame.window.cast(StringType()).alias("window"),
+                    result_data_frame.id,
+                    result_data_frame.avg_value
+                )
+            ).alias("value")
         )
-        .cast(StringType())
-        .alias("value")
-    )
-    '''
-    +--------------------------------------------------------+
-    |value                                                   |
-    +--------------------------------------------------------+
-    |[2020-01-01 08:00:00, 2020-01-01 08:15:00]##id-001##11.0|
-    |[2020-01-01 08:00:00, 2020-01-01 08:15:00]##id-002##12.0|
-    |[2020-01-01 08:00:00, 2020-01-01 08:15:00]##id-003##13.0|
-    |[2020-01-01 08:15:00, 2020-01-01 08:30:00]##id-001##21.0|
-    |[2020-01-01 08:15:00, 2020-01-01 08:30:00]##id-002##22.0|
-    |[2020-01-01 08:15:00, 2020-01-01 08:30:00]##id-003##23.0|
-    |[2020-01-01 08:45:00, 2020-01-01 09:00:00]##id-001##31.0|
-    |[2020-01-01 08:45:00, 2020-01-01 09:00:00]##id-002##32.0|
-    |[2020-01-01 08:45:00, 2020-01-01 09:00:00]##id-003##33.0|
-    |[2020-01-01 09:00:00, 2020-01-01 09:15:00]##id-001##41.0|
-    |[2020-01-01 09:00:00, 2020-01-01 09:15:00]##id-002##42.0|
-    |[2020-01-01 09:00:00, 2020-01-01 09:15:00]##id-003##43.0|
-    +--------------------------------------------------------+
-    '''
-    result_data_frame.show(100, False)
+        '''
+        +--------------------------------------------------------------------------------------+
+        |value                                                                                 |
+        +--------------------------------------------------------------------------------------+
+        |{"window":"[2020-01-01 08:00:00, 2020-01-01 08:15:00]","id":"id-001","avg_value":11.0}|
+        |{"window":"[2020-01-01 08:00:00, 2020-01-01 08:15:00]","id":"id-002","avg_value":12.0}|
+        |{"window":"[2020-01-01 08:00:00, 2020-01-01 08:15:00]","id":"id-003","avg_value":13.0}|
+        |{"window":"[2020-01-01 08:15:00, 2020-01-01 08:30:00]","id":"id-001","avg_value":21.0}|
+        |{"window":"[2020-01-01 08:15:00, 2020-01-01 08:30:00]","id":"id-002","avg_value":22.0}|
+        |{"window":"[2020-01-01 08:15:00, 2020-01-01 08:30:00]","id":"id-003","avg_value":23.0}|
+        |{"window":"[2020-01-01 08:45:00, 2020-01-01 09:00:00]","id":"id-001","avg_value":31.0}|
+        |{"window":"[2020-01-01 08:45:00, 2020-01-01 09:00:00]","id":"id-002","avg_value":32.0}|
+        |{"window":"[2020-01-01 08:45:00, 2020-01-01 09:00:00]","id":"id-003","avg_value":33.0}|
+        |{"window":"[2020-01-01 09:00:00, 2020-01-01 09:15:00]","id":"id-001","avg_value":41.0}|
+        |{"window":"[2020-01-01 09:00:00, 2020-01-01 09:15:00]","id":"id-002","avg_value":42.0}|
+        |{"window":"[2020-01-01 09:00:00, 2020-01-01 09:15:00]","id":"id-003","avg_value":43.0}|
+        +--------------------------------------------------------------------------------------+
+        '''
+        result_data_frame.show(100, False)
+    else:
+        # concat_ws concatenates multiple input string columns together into a single string column,
+        # using the given separator.
+        result_data_frame = result_data_frame.select(
+            concat_ws(
+                "##",
+                result_data_frame.window.cast(StringType()),
+                result_data_frame.id,
+                result_data_frame.avg_value
+            )
+            .cast(StringType())
+            .alias("value")
+        )
+        '''
+        +--------------------------------------------------------+
+        |value                                                   |
+        +--------------------------------------------------------+
+        |[2020-01-01 08:00:00, 2020-01-01 08:15:00]##id-001##11.0|
+        |[2020-01-01 08:00:00, 2020-01-01 08:15:00]##id-002##12.0|
+        |[2020-01-01 08:00:00, 2020-01-01 08:15:00]##id-003##13.0|
+        |[2020-01-01 08:15:00, 2020-01-01 08:30:00]##id-001##21.0|
+        |[2020-01-01 08:15:00, 2020-01-01 08:30:00]##id-002##22.0|
+        |[2020-01-01 08:15:00, 2020-01-01 08:30:00]##id-003##23.0|
+        |[2020-01-01 08:45:00, 2020-01-01 09:00:00]##id-001##31.0|
+        |[2020-01-01 08:45:00, 2020-01-01 09:00:00]##id-002##32.0|
+        |[2020-01-01 08:45:00, 2020-01-01 09:00:00]##id-003##33.0|
+        |[2020-01-01 09:00:00, 2020-01-01 09:15:00]##id-001##41.0|
+        |[2020-01-01 09:00:00, 2020-01-01 09:15:00]##id-002##42.0|
+        |[2020-01-01 09:00:00, 2020-01-01 09:15:00]##id-003##43.0|
+        +--------------------------------------------------------+
+        '''
+        result_data_frame.show(100, False)
 
     # result_data_frame must contains columns key(optional), value(required), topic(optional)
     # otherwise it can't be sent to Kafka
